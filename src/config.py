@@ -70,22 +70,27 @@ NIVEL_INICIAL = 1
 NIVEL_MAXIMO = 3
 
 ALDEA_ACEPTA_OTROS_LINAJES = False
-# Tablas oficiales pendientes (no inventadas; se llenan tras aprobación escrita
-# o se envían explícitamente por parámetro en las llamadas).
-RESISTENCIA_POR_NIVEL = {}       # Ej: {1: <int>, 2: <int>, 3: <int>} — PENDIENTE
-CAPACIDAD_POR_NIVEL = {}         # Ej: {1: <int>, 2: <int>, 3: <int>} — PENDIENTE
-COSTO_MEJORA_POR_NIVEL = {}      # Ej: {2: {"materiales": <int>, "etapa_minima": 2}, ...} — PENDIENTE
-COSTO_RECONSTRUCCION = {}        # Ej: {"materiales": <int>} — PENDIENTE
+# Configuración de aldeas y nacimientos recuperada del Colab corregido.
+RESISTENCIA_POR_NIVEL = {1: 100, 2: 150, 3: 200}
+CAPACIDAD_POR_NIVEL = {1: 10, 2: 15, 3: 20}
+COSTO_MEJORA_POR_NIVEL = {
+    2: {"materiales": 10, "alimento": 10, "minimo_vivos": 5},
+    3: {"materiales": 20, "alimento": 20, "minimo_vivos": 8},
+}
+COSTO_RECONSTRUCCION = {
+    "materiales": 5, "alimento": 5, "minimo_vivos": 2, "ciclos_en_refugio": 3
+}
 REQUISITOS_NACIMIENTO = {
-    "intervalo_ciclos": None,    # int > 0 (PENDIENTE)
-    "minimo_vivos": None,        # int >= 1 (PENDIENTE)
-    "costo_alimento": None,      # int >= 0 (PENDIENTE)
-    "costo_materiales": None,    # int >= 0 (PENDIENTE)
+    "intervalo_ciclos": 8,
+    "minimo_vivos": 2,
+    "costo_alimento": 3,
+    "costo_materiales": 2,
+    "maximo_poblacion": 20,
 }
 PROVISIONAL_CONFIG = {
-    "resistencia": None,         # int > 0 (PENDIENTE)
-    "capacidad": None,           # int > 0 (PENDIENTE)
-    "costo_materiales": None,    # int >= 0 (PENDIENTE)
+    "resistencia": 50,
+    "capacidad": 5,
+    "costo_materiales": 5,
 }
 
 XP_ETAPA_II = 20    # Regla 9.1: etapa I -> II
@@ -218,48 +223,32 @@ DURACION_CICLO = 12
 PERIODOS_VALIDOS = ("dia", "atardecer", "noche")
 
 DESGASTE_SACIEDAD = {
-    "hombre_lobo": {"dia": -3, "atardecer": -3, "noche": -6},
-    "vampiro": {"dia": 0, "atardecer": -3, "noche": -3},
-    "zombi": {"dia": -3, "atardecer": -3, "noche": -3},
+    "hombre_lobo": {"dia": -3, "atardecer": -3, "noche": -4},
+    "vampiro": {"dia": -3, "atardecer": -3, "noche": -3},
+    "zombi": {"dia": -2, "atardecer": -2, "noche": -2},
 }
 
 DANO_SACIEDAD_CERO = {
-    "hombre_lobo": {"dia": -10, "atardecer": -10, "noche": -6},
-    "vampiro": {"dia": -5, "atardecer": -4, "noche": -4},
-    "zombi": {"dia": -5, "atardecer": -5, "noche": -5},
+    linaje: {periodo: -15 for periodo in ("dia", "atardecer", "noche")}
+    for linaje in DESGASTE_SACIEDAD
 }
 
 COSTO_ENERGIA_POR_PERIODO = {
-    "hombre_lobo": {"dia": -3, "atardecer": -3, "noche": -7},
-    "vampiro": {"dia": -2, "atardecer": -6, "noche": -6},
-    "zombi": {"dia": -5, "atardecer": -5, "noche": -5},
+    linaje: {periodo: 0 for periodo in ("dia", "atardecer", "noche")}
+    for linaje in ("vampiro", "hombre_lobo", "zombi")
 }
 
 ACCIONES_MOVIMIENTO_P8 = {"MOVER"}
 
 RECUPERACION_ENERGIA_DESCANSO = {
-    "en_refugio": 8,
-    "en_aldea": 5,
-    "fuera_de_aldea": 2,
+    "en_refugio": 15, "en_aldea": 15, "fuera_de_aldea": 15
 }
 
-DANO_SOL_POR_LINAJE = {
-    "hombre_lobo": 0,
-    "vampiro": -23,
-    "zombi": 0,
-}
+DANO_SOL_POR_LINAJE = {"hombre_lobo": 0, "vampiro": -8, "zombi": 0}
 
-DANO_FUEGO_POR_LINAJE = {
-    "hombre_lobo": {"humana": -10, "bestia": -5},
-    "vampiro": -4,
-    "zombi": -8,
-}
+DANO_FUEGO_POR_LINAJE = {"hombre_lobo": -12, "vampiro": -12, "zombi": -18}
 
-DANO_CONTAMINACION_POR_LINAJE = {
-    "hombre_lobo": -6,
-    "vampiro": -7,
-    "zombi": -4,
-}
+DANO_CONTAMINACION_POR_LINAJE = {"hombre_lobo": -5, "vampiro": -5, "zombi": 5}
 
 #Otros atributos
 COSTO_ATAQUE = 5
@@ -282,8 +271,4 @@ PLAZO_CURACION = 4
 SALUD_AL_CURAR = 10
 # Un antidoto recupera 10 puntos de salud, sin pasar la salud maxima.
 
-COSTO_ENERGIA_PERIODO = {
-    "hombre_lobo": {"dia": -3, "atardecer": -3, "noche": -7},
-    "vampiro": {"dia": -2, "atardecer": -6, "noche": -6},
-    "zombi": {"dia": -5, "atardecer": -5, "noche": -5},
-}
+COSTO_ENERGIA_PERIODO = COSTO_ENERGIA_POR_PERIODO  # Alias de compatibilidad

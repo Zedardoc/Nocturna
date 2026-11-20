@@ -9,6 +9,7 @@ class ControlRecursos:
     def __init__(self):
         # Almacena las fuentes de recursos situadas en casillas específicas del mapa
         # Estructura: {(fila, columna): {"tipo": str, "cantidad": int, "capacidad_maxima": int}}
+        self.rng = random.Random()
         self.fuentes_mapa = {}
 
         # Copia propia de las reservas: cada partida empieza con los valores de config.py
@@ -170,7 +171,7 @@ class ControlRecursos:
             return self.guayagod_activo
 
         if self.ciclos_desde_ultima_aparicion >= 20:
-            if random.random() < 0.02:
+            if self.rng.random() < 0.02:
                 self.guayagod_activo = True
                 self.duracion_guayagod = 3
                 self.ciclos_desde_ultima_aparicion = 0
@@ -211,7 +212,7 @@ class ControlRecursos:
                 elif poder == max_poder and poder > 0:
                     empates.append(linaje)
 
-            self.linaje_protegido_actual = random.choice(empates) if len(empates) > 1 else linaje_elegido
+            self.linaje_protegido_actual = self.rng.choice(empates) if len(empates) > 1 else linaje_elegido
 
             if self.linaje_protegido_actual and registro is not None:
                 desc_texto = f"Guayagod reconoció la fortaleza del linaje de {self.linaje_protegido_actual} y decidió protegerlo"
