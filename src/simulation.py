@@ -19,7 +19,9 @@ import random
 
 from config import ESTADOS_AFD
 
-from movement import EjecutorAcciones, buscar_enemigo, puede_alimentarse_aqui
+from movement import (EjecutorAcciones, buscar_enemigo, puede_alimentarse_aqui,
+    buscar_refugio, buscar_construccion_enemiga, amenaza_superior_cercana,
+    hay_recurso_cercano, _en_acceso_refugio)
 from combat import ControlCombate
 from events import ControlEventos
 from experience import ControlExperiencia
@@ -34,53 +36,203 @@ from time_manager import (
 )
 from world import avanzar_efectos, liberar_casilla, marcar_efecto, consultar_efectos
 
-# ----------------------------------------------------------------------
-# P7 - AFD (tabla de transiciones tomada del Colab)
-# ----------------------------------------------------------------------
-UMBRAL_HAMBRE = 40
-UMBRAL_ENERGIA = 20
+# P7: AFD y prioridades de comportamiento
+# El AFD asigna una única acción por ciclo de acuerdo con las condiciones
+# de supervivencia, la proximidad de enemigos y el estado de las construcciones.
+# La ejecución del movimiento y de las acciones corresponde a P8.
 
+UMBRAL_HAMBRE = 40      # saciedad <= 40: la criatura tiene hambre (regla de saciedad)
+UMBRAL_ENERGIA = 20     # energia <= 20: la criatura prioriza descansar (regla de energia)
+
+# Tabla de transiciones: cada entrada lleva al estado que le corresponde.
+# Estados usados: los mismos nombres de ESTADOS_AFD.
 TRANSICIONES = {
     "veneno": "BUSCAR_CURA",
     "peligro_solar": "BUSCAR_REFUGIO",
+    "refugio_diurno": "DESCANSAR",
+    "retorno_preventivo": "BUSCAR_REFUGIO",
     "hambre": "BUSCAR_ALIMENTO",
     "hambre_en_fuente": "ALIMENTARSE",
     "energia_baja": "DESCANSAR",
     "enemigo_adyacente": "ATACAR",
     "enemigo_visible": "PERSEGUIR",
+    "amenaza_superior": "HUIR",
+    "construccion_adyacente": "ATACAR",
+    "construccion_visible": "PERSEGUIR",
     "falta_aldea": "CONSTRUIR",
+    "mejorar_aldea": "CONSTRUIR",
+    "recurso_disponible": "RECOLECTAR",
     "nada": "EXPLORAR",
 }
 
-# Estados cuya acción es desplazarse: P8 ya cobra energía por casilla,
-# así que P6 no debe cobrar el costo por acción encima (accion="MOVER").
-ESTADOS_DE_MOVIMIENTO = {
-    "EXPLORAR", "BUSCAR_ALIMENTO", "BUSCAR_REFUGIO", "BUSCAR_CURA",
-    "PERSEGUIR", "HUIR", "RECOLECTAR",
-}
-
-
 def elegir_entrada(situacion):
-    """Orden: muerte > veneno > sol > hambre > energía > enemigo adyacente
-    > enemigo visible > falta de aldea > nada."""
+    """Selecciona una sola transición según peligro y posibilidades reales.
+
+    Los riesgos ambientales y el veneno se atienden antes que los combates.
+    Una amenaza cercana que supera a la criatura activa HUIR; si existe
+    ventaja y energía suficiente, el AFD permite ATACAR o PERSEGUIR.
+    """
     if not situacion.get("vivo", True):
         return "muerto"
-    if situacion.get("veneno"):
-        return "veneno"
     if situacion.get("peligro_solar"):
         return "peligro_solar"
+    if situacion.get("veneno"):
+        return "veneno"
+    if situacion.get("en_refugio_de_dia"):
+        # Un vampiro no abandona un refugio seguro durante el día.
+        if situacion.get("enemigo_adyacente") and situacion.get("energia_para_atacar", True):
+            return "enemigo_adyacente"
+        if situacion.get("hambre") and situacion.get("en_fuente"):
+            return "hambre_en_fuente"
+        return "refugio_diurno"
+    if situacion.get("retorno_preventivo"):
+        return "retorno_preventivo"
+    if situacion.get("amenaza_superior"):
+        return "amenaza_superior"
+    if situacion.get("enemigo_adyacente") and situacion.get("energia_para_atacar", True):
+        return "enemigo_adyacente"
     if situacion.get("hambre"):
         return "hambre_en_fuente" if situacion.get("en_fuente") else "hambre"
     if situacion.get("energia_baja"):
         return "energia_baja"
-    if situacion.get("enemigo_adyacente"):
-        return "enemigo_adyacente"
     if situacion.get("enemigo_visible"):
         return "enemigo_visible"
     if situacion.get("falta_aldea"):
         return "falta_aldea"
+    if situacion.get("mejorar_aldea"):
+        return "mejorar_aldea"
+    if situacion.get("recurso_disponible"):
+        return "recurso_disponible"
+    if situacion.get("construccion_adyacente") and situacion.get("energia_para_atacar", True):
+        return "construccion_adyacente"
+    if situacion.get("construccion_visible"):
+        return "construccion_visible"
     return "nada"
 
+def decidir(criatura, situacion):
+    # Calcula el nuevo estado del AFD y lo guarda en criatura.estado_afd.
+    # Una criatura muerta siempre queda en MUERTO.
+    # Devuelve el estado elegido.
+    situacion = dict(situacion, vivo=criatura.vivo)
+    entrada = elegir_entrada(situacion)
+    if entrada == "muerto" or criatura.estado_afd == "MUERTO":
+        estado = "MUERTO"
+    else:
+        estado = TRANSICIONES[entrada]
+    criatura.estado_afd = estado
+    return estado
+
+def _esta_en_refugio_de_dia(criatura, aldeas, ciclo=None, eventos=None):
+    # True si un vampiro ya esta resguardado y sigue siendo de dia sin eclipse,
+    # evitando que abandone el refugio mientras exista peligro solar.
+    if criatura.linaje != "vampiro" or aldeas is None or ciclo is None:
+        return False
+    en_refugio = (aldeas.esta_en_refugio(criatura)
+                  or aldeas.criatura_en_casilla_refugio(criatura))
+    if not en_refugio:
+        return False
+    if eventos is not None and hasattr(eventos, "periodo_del_ciclo"):
+        es_dia = eventos.periodo_del_ciclo(ciclo) == "dia"
+    else:
+        es_dia = (ciclo % 12) < 4
+    hay_eclipse = False
+    if eventos is not None and hasattr(eventos, "bloquea_dano_solar"):
+        hay_eclipse = bool(eventos.bloquea_dano_solar())
+    return es_dia and not hay_eclipse
+
+def leer_situacion(criatura, mapa, poblacion, aldeas,
+                   veneno=False, peligro_solar=False, en_fuente=False,
+                   recursos=None, ciclo=None, eventos=None):
+    """Agrupa las señales del mapa, la supervivencia y las construcciones.
+
+    Una acción de construcción solo se habilita cuando existen los recursos y
+    las condiciones necesarias. Si faltan, la recolección mantiene prioridad
+    y evita intentos repetitivos de construcción sin resultados.
+    """
+    enemigo = buscar_enemigo(mapa, criatura, poblacion) if mapa is not None and poblacion is not None else None
+    edificio = buscar_construccion_enemiga(mapa, criatura, aldeas)
+    riesgo = (amenaza_superior_cercana(criatura, poblacion)
+              if poblacion is not None else False)
+    # Durante el atardecer y la noche, el vampiro estima los pasos necesarios
+    # para volver a su refugio antes del próximo período diurno.
+    regreso_preventivo = False
+    if (criatura.linaje == "vampiro" and ciclo is not None
+            and aldeas is not None and mapa is not None
+            and criatura.posicion is not None and criatura.vivo
+            and not aldeas.esta_en_refugio(criatura)
+            and not (eventos is not None and eventos.bloquea_dano_solar())):
+        fase = ciclo % 12
+        if 4 <= fase <= 11:
+            ruta_refugio = buscar_refugio(mapa, criatura, aldeas)
+            if ruta_refugio is not None:
+                pasos_hasta_refugio = len(ruta_refugio)
+                ciclos_hasta_dia = 12 - fase
+                regreso_preventivo = (pasos_hasta_refugio + 1 >= ciclos_hasta_dia)
+    recurso_disp = False
+    construccion_posible = False
+    mejora_posible = False
+    if recursos is not None and mapa is not None and criatura.posicion is not None:
+        alimentacion = recursos.consultar_reserva(criatura.linaje, "alimento")
+        materiales = recursos.consultar_reserva(criatura.linaje, "materiales")
+        if alimentacion < 18 or materiales < 22:
+            recurso_disp = (hay_recurso_cercano(mapa, criatura, recursos)
+                            or alimentacion < 8 or materiales < 6)
+        if aldeas is not None and poblacion is not None:
+            if not aldeas.existe_aldea(criatura.linaje):
+                if aldeas.existe_refugio_provisional(criatura.linaje):
+                    ref = aldeas.consultar_refugio_provisional(criatura.linaje)
+                    construccion_posible = (
+                        ciclo is not None
+                        and ref.get("ciclo_creacion") is not None
+                        and ciclo - ref["ciclo_creacion"] >= 3
+                        and len(poblacion.obtener_vivas(criatura.linaje)) >= 2
+                        and materiales >= 5 and alimentacion >= 5
+                    )
+                else:
+                    # El refugio provisional se permite solo tras destruir la aldea.
+                    construccion_posible = (
+                        criatura.linaje in aldeas.aldeas and materiales >= 5
+                    )
+            else:
+                mejora_posible = aldeas.puede_mejorar_aldea(
+                    criatura.linaje, poblacion, recursos
+                )[0]
+    return {
+        "hambre": criatura.saciedad <= UMBRAL_HAMBRE,
+        "energia_baja": criatura.energia <= UMBRAL_ENERGIA,
+        "veneno": veneno,
+        "peligro_solar": peligro_solar,
+        "en_refugio_de_dia": _esta_en_refugio_de_dia(criatura, aldeas, ciclo, eventos),
+        "retorno_preventivo": regreso_preventivo,
+        "en_fuente": en_fuente,
+        "enemigo_adyacente": enemigo is not None and enemigo["ruta"] == [],
+        "enemigo_visible": enemigo is not None and enemigo["ruta"] != [],
+        "amenaza_superior": riesgo,
+        "energia_para_atacar": criatura.energia >= 5,
+        "construccion_adyacente": edificio is not None and edificio["ruta"] == [],
+        "construccion_visible": edificio is not None and edificio["ruta"] != [],
+        "falta_aldea": construccion_posible,
+        "mejorar_aldea": mejora_posible,
+        "recurso_disponible": recurso_disp,
+    }
+
+# P7 - INTEGRACIÓN DEL ESTADO DE ENVENENAMIENTO CON P9
+# La comprobación de veneno alimenta las transiciones del AFD.
+# El peligro solar, la huida y la recolección se consultan desde P7 y P8.
+
+def leer_situacion_parte3(criatura, mapa, poblacion, aldeas, combate,
+                          peligro_solar=False, en_fuente=False,
+                          recursos=None, ciclo=None, eventos=None):
+    veneno = combate.esta_envenenado(criatura)
+    return leer_situacion(criatura, mapa, poblacion, aldeas,
+                          veneno=veneno, peligro_solar=peligro_solar,
+                          en_fuente=en_fuente, recursos=recursos,
+                          ciclo=ciclo, eventos=eventos)
+
+
+
+ESTADOS_DE_MOVIMIENTO = {"EXPLORAR", "BUSCAR_ALIMENTO", "BUSCAR_REFUGIO", "BUSCAR_CURA",
+ "PERSEGUIR", "HUIR", "RECOLECTAR"}
 
 class Simulacion:
     """
@@ -119,6 +271,8 @@ class Simulacion:
         self.intervalo_regeneracion = intervalo_regeneracion
 
         self._rng = random.Random(semilla)
+        if hasattr(self.recursos, "rng"):
+            self.recursos.rng = random.Random(semilla)
 
         self.reloj = reloj if reloj is not None else RelojSimulacion()
 
@@ -153,85 +307,71 @@ class Simulacion:
         return False
 
     def _leer_situacion(self, criatura, ciclo):
-        """Arma el diccionario de situaciones de P7 con los datos de cada módulo."""
-        enemigo = buscar_enemigo(self.mapa, criatura, self.poblacion)
-        return {
-            "veneno": self.combate.esta_envenenado(criatura),
-            "peligro_solar": vampiro_necesita_buscar_refugio(
-                criatura, ciclo, self.aldeas, self.eventos
-            ),
-            "hambre": criatura.saciedad <= UMBRAL_HAMBRE,
-            "en_fuente": puede_alimentarse_aqui(criatura, self.recursos),
-            "energia_baja": criatura.energia <= UMBRAL_ENERGIA,
-            "enemigo_adyacente": enemigo is not None and enemigo["ruta"] == [],
-            "enemigo_visible": enemigo is not None and enemigo["ruta"] != [],
-            "falta_aldea": not self.aldeas.existe_aldea(criatura.linaje),
-        }
+        """Agrupa señales del entorno, riesgos y recursos para el AFD (P7)."""
+        return leer_situacion(
+            criatura, self.mapa, self.poblacion, self.aldeas,
+            veneno=self.combate.esta_envenenado(criatura),
+            peligro_solar=vampiro_necesita_buscar_refugio(
+                criatura, ciclo, self.aldeas, self.eventos),
+            en_fuente=puede_alimentarse_aqui(criatura, self.recursos),
+            recursos=self.recursos, ciclo=ciclo, eventos=self.eventos,
+        )
 
     def _decidir_estado(self, criatura, ciclo):
-        """Aplica el AFD de P7 y guarda el resultado en criatura.estado_afd."""
-        if not criatura.vivo:
-            criatura.estado_afd = "MUERTO"
-            return "MUERTO"
-
-        situacion = self._leer_situacion(criatura, ciclo)
-        estado = TRANSICIONES[elegir_entrada(situacion)]
-
+        """Aplica P7 y conserva la acción decidida en el objeto Criatura."""
+        estado = decidir(criatura, self._leer_situacion(criatura, ciclo))
         if estado not in ESTADOS_AFD:
-            raise ValueError(f"Estado AFD no reconocido: {estado}")
-
-        criatura.estado_afd = estado
+            raise ValueError("Estado AFD no reconocido: " + str(estado))
         return estado
 
     def _sincronizar_luna(self):
-        """P11: reaplica el bono de Luna de sangre. Hay que llamarlo después de
-        cualquier cosa que recalcule ataque/defensa (forma, evolución, zona)."""
+        """Actualiza primero los bonos de zona (P10) y después Luna de sangre (P11)."""
+        for criatura in self.poblacion.obtener_vivas():
+            self.experiencia.actualizar_bonos_zona(criatura, self.mapa)
         self.eventos.sincronizar_luna_sangre(self.poblacion)
 
     def _procesar_una_criatura(self, criatura, ciclo):
-        """Veneno, decisión del AFD y acción principal de una criatura."""
-        # P6: cambio de forma del lobo según el periodo / eclipse.
+        """Procesa el veneno, la decisión AFD y la acción de P8 de una criatura."""
+        # El cambio de forma se aplica antes de evaluar los enfrentamientos.
         actualizar_forma(criatura, ciclo, evento_activo=self.eventos.evento_activo())
         self._sincronizar_luna()
 
-        # P9: el veneno se procesa antes de decidir.
         veneno = None
         if self.combate.esta_envenenado(criatura):
             veneno = self.combate.procesar_veneno(
-                self.mapa, criatura, self.recursos, ciclo, self.registro
-            )
-
+                self.mapa, criatura, self.recursos, ciclo, self.registro)
         if not criatura.vivo:
             return {"id": criatura.id, "estado": "MUERTO", "ok": False, "veneno": veneno}
 
         estado = self._decidir_estado(criatura, ciclo)
-
         resultado = self.ejecutor.ejecutar_accion(
             criatura, ciclo, self.mapa, self.poblacion,
             recursos=self.recursos, aldeas=self.aldeas,
             combate=self.combate, registro=self.registro,
         )
 
-        # P10: XP por alimentación y por ataques.
-        self.experiencia.procesar_resultado_accion(criatura, ciclo, resultado)
-        if estado == "ATACAR":
-            externo = resultado.get("externo") or {}
-            objetivo = self.poblacion.buscar_por_id(externo.get("objetivo_id"))
-            self.experiencia.procesar_resultado_ataque(
-                criatura, ciclo, externo, objetivo=objetivo
-            )
-
-        # P6: energía. Si se movió, P8 ya cobró por casilla -> accion="MOVER" (costo 0).
         if resultado.get("ok"):
             if estado == "DESCANSAR":
                 aplicar_recuperacion_energia(criatura, self.aldeas)
-            else:
-                mov = resultado.get("movimiento") or {}
-                accion = "MOVER" if (estado in ESTADOS_DE_MOVIMIENTO and mov.get("movio")) else estado
-                aplicar_costo_energia_accion(criatura, ciclo, accion=accion)
+            elif estado in ("ALIMENTARSE", "RECOLECTAR", "CONSTRUIR"):
+                # P8 ya cobra 2 por movimiento y P9 ya cobra 5 por ataque.
+                aplicar_costo_energia_accion(criatura, ciclo, accion=estado)
+
+        # El alojamiento no se pierde por actuar sin desplazarse. Solo se
+        # retira cuando la criatura sale físicamente del perímetro protegido.
+        if criatura.vivo and self.aldeas.esta_en_refugio(criatura):
+            if not _en_acceso_refugio(self.mapa, criatura, self.aldeas):
+                self.aldeas.desalojar_criatura(criatura)
+
+        self.experiencia.procesar_resultado_accion(criatura, ciclo, resultado)
+        if estado == "ATACAR":
+            externo = resultado.get("externo") or {}
+            if externo.get("tipo_objetivo") != "construccion":
+                objetivo = self.poblacion.buscar_por_id(externo.get("objetivo_id"))
+                self.experiencia.procesar_resultado_ataque(
+                    criatura, ciclo, externo, objetivo=objetivo)
 
         self._registrar_muerte_si_corresponde(criatura, ciclo, "combate/accion")
-
         return {
             "id": criatura.id,
             "estado": estado,
@@ -257,107 +397,100 @@ class Simulacion:
     # ------------------------------------------------------------------
 
     def ejecutar_ciclo(self):
-        """Ejecuta exactamente un ciclo de mundo y devuelve un resumen (dict)."""
+        """Ejecuta un ciclo preservando la interfaz pública y las reglas de integración."""
         ciclo = self.reloj.ciclo
         periodo = self.reloj.periodo
         vivas_antes = {c.id: c for c in self.poblacion.obtener_vivas()}
 
-        # 1. Eventos ambientales y Guayagod.
+        # Los cadáveres previos envejecen antes de crear nuevos cadáveres.
+        self.recursos.avanzar_cadáveres()
         cambios_eventos = self.eventos.avanzar_ciclo(
-            ciclo,
-            mapa=self.mapa,
-            poblacion=self.poblacion,
-            recursos=self.recursos,
-            aldeas=self.aldeas,
-            registro=self.registro,
-            aplicar_dano_criaturas=False,   # P6 aplica el daño ambiental
+            ciclo, mapa=self.mapa, poblacion=self.poblacion,
+            recursos=self.recursos, aldeas=self.aldeas,
+            registro=self.registro, aplicar_dano_criaturas=False,
         )
         guayagod_activo = self.recursos.evaluar_aparicion_guayagod(
-            ciclo, self.eventos.evento_activo(), self.poblacion, self.registro
-        )
+            ciclo, self.eventos.evento_activo(), self.poblacion, self.registro)
+        if guayagod_activo:
+            # Guayagod selecciona UN SOLO objetivo: criatura O construcción.
+            objetivos = [("criatura", c) for c in self.poblacion.obtener_vivas()
+                         if c.linaje != self.recursos.linaje_protegido_actual]
+            objetivos += [("construccion", a) for a in self.aldeas.listar_construcciones()
+                          if a["existe"] and a["linaje"] != self.recursos.linaje_protegido_actual]
+            if objetivos:
+                tipo, objetivo = self._rng.choice(objetivos)
+                if tipo == "criatura":
+                    self.recursos.ejecutar_ataque_guayagod(objetivo, ciclo, self.registro)
+                    self._registrar_muerte_si_corresponde(objetivo, ciclo, "ataque de Guayagod")
+                else:
+                    self.recursos.ejecutar_ataque_guayagod_construccion(
+                        objetivo, self.aldeas, ciclo, self.registro)
 
-        # 2. Criaturas (copia de la lista: pueden morir durante el ciclo).
+        self._sincronizar_luna()
         resultados_criaturas = []
         for criatura in list(self.poblacion.obtener_vivas()):
-            if not criatura.vivo:      # murió atacada antes de su turno
+            if not criatura.vivo:
                 continue
-
             hambre = actualizar_hambre_y_saciedad(criatura, ciclo)
             self._registrar_muerte_si_corresponde(criatura, ciclo, "inanición")
-
-            if criatura.vivo:
-                accion = self._procesar_una_criatura(criatura, ciclo)
-            else:
-                accion = {"id": criatura.id, "estado": "MUERTO", "ok": False}
-
+            accion = (self._procesar_una_criatura(criatura, ciclo)
+                      if criatura.vivo else {"id": criatura.id, "estado": "MUERTO", "ok": False})
             ambiente = None
             if criatura.vivo:
                 ambiente = aplicar_dano_ambiental(
-                    criatura, self.mapa, ciclo,
-                    aldeas=self.aldeas, info_p11=self.eventos,
-                )
+                    criatura, self.mapa, ciclo, aldeas=self.aldeas,
+                    info_p11=self.eventos, xp=self.experiencia)
                 self._registrar_muerte_si_corresponde(criatura, ciclo, "daño ambiental")
-
             if criatura.vivo:
-                # Solo cuenta como exposición solar si hubo daño solar real
-                # (de día, fuera de refugio y sin eclipse) y sobrevivió.
                 if ambiente and ambiente["dano_sol"] != 0:
                     self.experiencia.registrar_exposicion_solar(criatura, ciclo)
-                # +1 XP de supervivencia, contadores y bonos de zona.
                 self.experiencia.procesar_ciclo(criatura, ciclo, mapa=self.mapa)
                 self._sincronizar_luna()
-
             resultados_criaturas.append({
-                "id": criatura.id,
-                "hambre": hambre,
-                "accion": accion,
-                "ambiente": ambiente,
-                "vivo": criatura.vivo,
+                "id": criatura.id, "hambre": hambre, "accion": accion,
+                "ambiente": ambiente, "vivo": criatura.vivo,
             })
 
-        # 3. Evoluciones.
         evoluciones = self.experiencia.evolucionar_poblacion(
-            self.poblacion, ciclo, registro=self.registro, mapa=self.mapa
-        )
+            self.poblacion, ciclo, registro=self.registro, mapa=self.mapa)
         if evoluciones:
             self._sincronizar_luna()
-
-        # 4. Mantenimiento del mundo.
-        self.recursos.avanzar_cadáveres()
-        if self.intervalo_regeneracion and ciclo % self.intervalo_regeneracion == 0:
-            self.recursos.regenerar_fuentes()
         self.aldeas.limpiar_habitantes_muertos(self.poblacion)
 
-        # 5. Registro y marcas temporales del mapa.
+        # Se permite nacer cada ocho ciclos si quedan supervivientes y
+        # se cumplen la capacidad, reservas y espacio físico definidos en P5.
+        nacimientos = []
+        for linaje in ("vampiro", "hombre_lobo", "zombi"):
+            if self.poblacion.obtener_vivas(linaje):
+                nueva, _ = self.aldeas.generar_individuo(
+                    self.mapa, linaje, self.poblacion, self.recursos,
+                    ciclo, registro=self.registro)
+                if nueva is not None:
+                    nacimientos.append(nueva.id)
+
+        if self.intervalo_regeneracion and ciclo % self.intervalo_regeneracion == 0:
+            self.recursos.regenerar_fuentes()
         if self.registro is not None:
             self.registro.registrar_ciclo(
-                ciclo,
-                self.poblacion,
+                ciclo, self.poblacion,
                 eventos_activos=[e["nombre"] for e in self.eventos.listar_eventos_activos()],
-                eventos_ciclo=[],  # P11 ya anota sus eventos con registrar_evento_ambiental
+                eventos_ciclo=[],
             )
         avanzar_efectos(self.mapa)
-
         vivas_despues = self.poblacion.obtener_vivas()
         muertas = [
             {"id": i, "linaje": c.linaje, "causa": self._causa_muerte(i)}
             for i, c in vivas_antes.items() if not c.vivo
         ]
-
         resumen = {
-            "ciclo": ciclo,
-            "periodo": periodo,
-            "eventos": cambios_eventos,
-            "guayagod": guayagod_activo,
-            "criaturas": resultados_criaturas,
-            "evoluciones": evoluciones,
-            "muertes": muertas,
-            "vivos": len(vivas_despues),
+            "ciclo": ciclo, "periodo": periodo, "eventos": cambios_eventos,
+            "guayagod": guayagod_activo, "criaturas": resultados_criaturas,
+            "evoluciones": evoluciones, "nacimientos": nacimientos,
+            "muertes": muertas, "vivos": len(vivas_despues),
             "muertos": len(self.poblacion.criaturas) - len(vivas_despues),
             "extincion": len(vivas_despues) == 0,
         }
         self.historial_ciclos.append(resumen)
-
         self.reloj.avanzar()
         return resumen
 

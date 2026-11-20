@@ -6,7 +6,7 @@ from config import (
     DURACION_CICLO,
     DESGASTE_SACIEDAD,
     DANO_SACIEDAD_CERO,
-    COSTO_ENERGIA_PERIODO as COSTO_ENERGIA_POR_PERIODO,
+    COSTO_ENERGIA_POR_PERIODO,
     ACCIONES_MOVIMIENTO_P8,
     RECUPERACION_ENERGIA_DESCANSO,
     DANO_SOL_POR_LINAJE,
@@ -210,8 +210,7 @@ def obtener_condicion_descanso(criatura, aldeas=None):
 
 def aplicar_recuperacion_energia(criatura, aldeas=None):
     """
-    Aplica la recuperación de energía al descansar (+8 en refugio, +5 en aldea,
-    +2 fuera de aldea), respetando [0, energia_maxima] de P2.
+    Aplica la recuperación reglamentaria de +15 al descansar, respetando [0, energia_maxima] de P2.
     """
     if not criatura.vivo:
         return {
@@ -247,16 +246,13 @@ def determinar_forma_lobo(periodo, evento_activo=None):
     """
     Determina la forma esperada ('humana' o 'bestia') según el período
     y el evento ambiental activo (sin sortear eventos).
-    Devuelve None si en el período actual no se fuerza un cambio (p. ej., 'atardecer').
+    Durante el día y el atardecer mantiene la forma humana; durante la noche es bestia.
     """
-    if evento_activo == "Eclipse":
-        return "humana"
-
     if periodo == "noche":
         return "bestia"
-    if periodo == "dia":
+    if periodo in ("dia", "atardecer"):
         return "humana"
-    return None
+    raise ValueError("ERROR INTERNO: periodo no reconocido")
 
 
 def actualizar_forma(criatura, ciclo, evento_activo=None):
@@ -305,21 +301,23 @@ def actualizar_forma(criatura, ciclo, evento_activo=None):
 
 
 
-def calcular_dano_sol(criatura, periodo, en_refugio=False, info_p11=None):
+def calcular_dano_sol(criatura, periodo, en_refugio=False, info_p11=None, xp=None):
     """
     Calcula el daño por exposición solar (solo aplica en período 'dia',
     si no está en refugio, y sujeto a la información de Eclipse de P11).
     """
     if periodo != "dia" or en_refugio:
         return 0
-    if info_p11 is not None and hasattr(info_p11, "bloquea_dano_solar") and info_p11.bloquea_dano_solar():
-        return 0  # el Eclipse impide el daño solar
 
-    # PENDIENTE P11: aquí debe usarse la información del sistema de P11 para
-    # verificar si hay un "Eclipse" activo y ajustar el comportamiento solar
-    # sin programar el sorteo del evento.
+    # La condición de Eclipse se consulta a P11; P6 no realiza sorteos.
     if info_p11 is not None:
-        pass
+        if (hasattr(info_p11, "bloquea_dano_solar") and info_p11.bloquea_dano_solar()) or (
+            hasattr(info_p11, "eclipse_activo") and info_p11.eclipse_activo()
+        ) or info_p11 == "Eclipse":
+            return 0
+
+    if xp is not None and criatura.linaje == "vampiro" and "dano_solar_reducido" in xp.adaptaciones.get(criatura.id, []):
+        return -xp.obtener_dano_solar(criatura)
 
     return DANO_SOL_POR_LINAJE.get(criatura.linaje, 0)
 
@@ -333,11 +331,11 @@ def calcular_dano_fuego(criatura):
 
 
 def calcular_dano_contaminacion(criatura):
-    """Calcula el daño por efecto 'contaminacion' en la casilla actual."""
+    """Devuelve el cambio de salud por contaminación (+5 para zombis)."""
     return DANO_CONTAMINACION_POR_LINAJE.get(criatura.linaje, 0)
 
 
-def aplicar_dano_ambiental(criatura, mapa, ciclo, aldeas=None, info_p11=None):
+def aplicar_dano_ambiental(criatura, mapa, ciclo, aldeas=None, info_p11=None, xp=None):
     """
     Consulta el mapa de P2 para sol, fuego o contaminación y aplica las
     consecuencias aprobadas respetando los límites de P2.
@@ -364,15 +362,13 @@ def aplicar_dano_ambiental(criatura, mapa, ciclo, aldeas=None, info_p11=None):
     efectos_casilla = consultar_efectos(mapa, fila, columna)
 
     en_refugio = False
-    if aldeas is not None and hasattr(aldeas, "esta_en_refugio"):
-        en_refugio = bool(aldeas.esta_en_refugio(criatura))
+    if aldeas is not None:
+        if hasattr(aldeas, "esta_en_refugio") and aldeas.esta_en_refugio(criatura):
+            en_refugio = True
+        elif hasattr(aldeas, "criatura_en_casilla_refugio") and aldeas.criatura_en_casilla_refugio(criatura):
+            en_refugio = True
 
-    # PENDIENTE P11: consumir aquí el estado de Eclipse entregado por el sistema
-    # de P11 cuando esté disponible (no sortear eventos en P6).
-    if info_p11 is not None:
-        pass
-
-    dano_sol = calcular_dano_sol(criatura, periodo, en_refugio=en_refugio, info_p11=info_p11)
+    dano_sol = calcular_dano_sol(criatura, periodo, en_refugio=en_refugio, info_p11=info_p11, xp=xp)
     dano_fuego = calcular_dano_fuego(criatura) if "fuego" in efectos_casilla else 0
     dano_cont = calcular_dano_contaminacion(criatura) if "contaminacion" in efectos_casilla else 0
 

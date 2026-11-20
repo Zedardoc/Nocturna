@@ -175,43 +175,54 @@ def enemigos_visibles(criatura, poblacion):
 
 
 def prioridad_objetivo(cazador, presa):
-    # A quien persigue cada linaje (regla 3).
-    # 0 = principal, 1 = secundario, None = no lo persigue.
+    """Asigna preferencias de búsqueda entre linajes enemigos.
+
+    El hombre lobo humano puede defenderse o aprovechar un combate
+    favorable, pero no recibe la prioridad de caza de su forma bestial.
+    La evaluación de riesgo determina después si persigue o evita al rival.
+    """
     if presa.linaje == cazador.linaje:
         return None
     if cazador.linaje in ("vampiro", "zombi"):
         presa_humana = presa.linaje == "hombre_lobo" and presa.forma == "humana"
         return 0 if presa_humana else 1
     if cazador.linaje == "hombre_lobo":
-        if cazador.forma != "bestia":
-            return None
-        return 0 if presa.linaje == "vampiro" else 1
+        if cazador.forma == "bestia":
+            return 0 if presa.linaje == "vampiro" else 1
+        return 1
     return None
 
 
 def buscar_enemigo(mapa, criatura, poblacion):
-    # Ruta a una casilla adyacente al objetivo mas cercano (alcance 1).
-    # Primero objetivos principales y luego secundarios.
-    # Devuelve {"ruta", "objetivo_id", "prioridad"} o None.
-    # ruta [] significa que ya esta junto al objetivo.
+    """Selecciona enemigos que la criatura puede enfrentar con ventaja.
+
+    La amenaza desfavorable permanece visible para la decisión de huida,
+    pero no se convierte en un objetivo de persecución automática.
+    Los lobos humanos pueden atacar en defensa propia cuando el cálculo
+    de supervivencia resulta favorable.
+    """
     if criatura.posicion is None:
         return None
-    visibles = enemigos_visibles(criatura, poblacion)
-    for nivel in (0, 1):   # si ya hay un objetivo adyacente, no hace falta moverse
+    visibles = [enemigo for enemigo in enemigos_visibles(criatura, poblacion)
+                if evaluar_ventaja_combate(criatura, enemigo)]
+    for nivel in (0, 1):
         for otra in visibles:
-            if prioridad_objetivo(criatura, otra) == nivel and distancia(criatura.posicion, otra.posicion) == 1:
+            if (prioridad_objetivo(criatura, otra) == nivel
+                    and distancia(criatura.posicion, otra.posicion) == 1):
                 return {"ruta": [], "objetivo_id": otra.id, "prioridad": nivel}
     for nivel in (0, 1):
-        adyacentes = {}   # casilla adyacente y id del objetivo
+        adyacentes = {}
         for otra in visibles:
             if prioridad_objetivo(criatura, otra) != nivel:
                 continue
-            for vecino in obtener_vecinos(mapa, otra.posicion[0], otra.posicion[1]):
-                if es_transitable(mapa, vecino[0], vecino[1]):
+            for vecino in obtener_vecinos(mapa, *otra.posicion):
+                if (es_transitable(mapa, *vecino)
+                        and (vecino == criatura.posicion
+                             or casilla_disponible(mapa, *vecino))):
                     adyacentes.setdefault(vecino, otra.id)
         if not adyacentes:
             continue
-        ruta = buscar_ruta(mapa, criatura.posicion, set(adyacentes.keys()))
+        ruta = buscar_ruta(mapa, criatura.posicion, set(adyacentes))
         if ruta is None:
             continue
         destino = ruta[-1] if ruta else criatura.posicion
@@ -220,13 +231,31 @@ def buscar_enemigo(mapa, criatura, poblacion):
 
 
 def buscar_refugio(mapa, criatura, aldeas, permitir_destino_ocupado=False):
-    # Ruta a la aldea de su linaje o, si fue destruida, a su refugio provisional (P5).
-    if criatura.posicion is None:
+    """Busca la casilla accesible más cercana del área de alojamiento.
+
+    La capacidad declarada por P5 determina el número mínimo de casillas
+    disponibles alrededor de cada construcción. Una ruta nunca termina en
+    una casilla ocupada por otra criatura. Las plazas de P5 limitan el
+    alojamiento independientemente de los puntos libres del perímetro.
+    """
+    if criatura.posicion is None or aldeas is None:
         return None
-    destino = aldeas.obtener_refugio_disponible_linaje(criatura.linaje)
-    if destino is None or not destino["existe"]:
+    construccion = aldeas.obtener_refugio_disponible_linaje(criatura.linaje)
+    if construccion is None or not construccion["existe"]:
         return None
-    return buscar_ruta(mapa, criatura.posicion, {destino["casilla"]}, permitir_destino_ocupado)
+    centro = construccion["casilla"]
+    radio = radio_acceso_construccion(construccion)
+    destinos = set()
+    for fila in range(max(0, centro[0] - radio), min(len(mapa), centro[0] + radio + 1)):
+        for columna in range(max(0, centro[1] - radio), min(len(mapa[fila]), centro[1] + radio + 1)):
+            pos = (fila, columna)
+            if (distancia(pos, centro) <= radio
+                    and es_transitable(mapa, fila, columna)
+                    and (pos == criatura.posicion or casilla_disponible(mapa, fila, columna))):
+                destinos.add(pos)
+    if not destinos:
+        return None
+    return buscar_ruta(mapa, criatura.posicion, destinos, permitir_destino_ocupado=False)
 
 
 def intentar_mover(mapa, criatura, ruta, pasos_max=None):
@@ -293,13 +322,17 @@ class EjecutorAcciones:
                 "movimiento": movimiento, "posicion": criatura.posicion, "externo": externo}
 
     def _explorar(self, mapa, criatura):
-        # Paso a la vecina libre menos visitada, sin azar.
+        # Paso a la vecina libre menos visitada, sin azar (desempate rotado por ID para dispersar).
         visitas = self.visitas.setdefault(criatura.id, {})
         visitas[criatura.posicion] = visitas.get(criatura.posicion, 0) + 1
         total = {"movio": False, "pasos": 0, "posicion": criatura.posicion,
                  "llego": False, "motivo": "sin casillas libres"}
         for _ in range(MOVIMIENTO_POR_ACCION):
-            candidatas = [v for v in obtener_vecinos(mapa, criatura.posicion[0], criatura.posicion[1])
+            vecinos = obtener_vecinos(mapa, criatura.posicion[0], criatura.posicion[1])
+            if vecinos:
+                desfase = getattr(criatura, "id", 0) % len(vecinos)
+                vecinos = vecinos[desfase:] + vecinos[:desfase]
+            candidatas = [v for v in vecinos
                           if es_transitable(mapa, v[0], v[1]) and casilla_disponible(mapa, v[0], v[1])]
             if not candidatas:
                 break
@@ -356,6 +389,17 @@ class EjecutorAcciones:
         self.ultimo_ciclo_accion[criatura.id] = ciclo   # se marca antes de actuar
 
         if estado == "EXPLORAR":
+            # Una fuente compatible bajo la criatura permite recolectar sin
+            # desplazamientos adicionales, incluso durante la exploración.
+            if recursos is not None:
+                f, c = criatura.posicion
+                fuente = recursos.consultar_fuente(f, c)
+                if (fuente is not None and fuente["cantidad"] > 0
+                        and (fuente["tipo"] == "materiales"
+                             or recursos.es_alimento_compatible(criatura.linaje, fuente["tipo"]))):
+                    cantidad = recursos.recolectar_de_fuente(f, c, criatura.linaje, 1)
+                    return self._resultado(criatura, estado, cantidad > 0,
+                                           "exploracion: recurso recolectado")
             mov = self._explorar(mapa, criatura)
             return self._resultado(criatura, estado, True, "exploro", mov)
 
@@ -424,19 +468,19 @@ class EjecutorAcciones:
             if aldeas.esta_en_refugio(criatura):
                 return self._resultado(criatura, estado, True, "ya esta en refugio")
             mov = None
-            if not aldeas.criatura_en_casilla_refugio(criatura):
+            if not _en_acceso_refugio(mapa, criatura, aldeas):
                 ruta = buscar_refugio(mapa, criatura, aldeas)
                 if ruta is None:
                     return self._resultado(criatura, estado, False, "sin ruta a la aldea o al refugio")
                 mov = intentar_mover(mapa, criatura, ruta)
-            if aldeas.criatura_en_casilla_refugio(criatura):
+            if _en_acceso_refugio(mapa, criatura, aldeas):
                 ok, mensaje = aldeas.alojar_criatura(criatura)
                 return self._resultado(criatura, estado, ok, mensaje, mov)
             return self._resultado(criatura, estado, True, "avanza hacia el refugio", mov)
 
         if estado == "DESCANSAR":
             # La energia que recupera la calcula P6; aqui solo se verifica el refugio.
-            if aldeas is not None and aldeas.criatura_en_casilla_refugio(criatura):
+            if aldeas is not None and _en_acceso_refugio(mapa, criatura, aldeas):
                 if aldeas.esta_en_refugio(criatura):
                     return self._resultado(criatura, estado, True, "descansa en refugio")
                 ok, mensaje = aldeas.alojar_criatura(criatura)
@@ -444,15 +488,26 @@ class EjecutorAcciones:
             return self._resultado(criatura, estado, True, "descansa en el lugar (sin refugio)")
 
         if estado == "PERSEGUIR":
+            # Solo se persiguen criaturas con pronóstico favorable de combate.
+            # Si no las hay, se permite aproximarse a una construcción enemiga.
             hallado = buscar_enemigo(mapa, criatura, poblacion)
-            if hallado is None:
-                return self._resultado(criatura, estado, False, "sin enemigo alcanzable")
-            if not hallado["ruta"]:
+            if hallado is not None:
+                if not hallado["ruta"]:
+                    return self._resultado(criatura, estado, True,
+                                           "ya esta junto al enemigo " + str(hallado["objetivo_id"]))
+                mov = intentar_mover(mapa, criatura, hallado["ruta"])
+                return self._resultado(criatura, estado, mov["movio"],
+                                       "avanza hacia el enemigo " + str(hallado["objetivo_id"]), mov)
+            edificio = buscar_construccion_enemiga(mapa, criatura, aldeas)
+            if edificio is None:
+                return self._resultado(criatura, estado, False,
+                                       "sin objetivo enemigo o construccion alcanzable")
+            if not edificio["ruta"]:
                 return self._resultado(criatura, estado, True,
-                                       "ya esta junto al enemigo " + str(hallado["objetivo_id"]))
-            mov = intentar_mover(mapa, criatura, hallado["ruta"])
-            return self._resultado(criatura, estado, True,
-                                   "avanza hacia el enemigo " + str(hallado["objetivo_id"]), mov)
+                                       "ya esta junto a una construccion enemiga")
+            mov = intentar_mover(mapa, criatura, edificio["ruta"])
+            return self._resultado(criatura, estado, mov["movio"],
+                                   "se aproxima a construccion enemiga", mov)
 
         if estado == "HUIR":
             mov = self._huir(mapa, criatura, poblacion)
@@ -464,10 +519,33 @@ class EjecutorAcciones:
             if combate is None or recursos is None:
                 return self._resultado(criatura, estado, False, "falta combate (P9) o recursos (P4)")
             hallado = buscar_enemigo(mapa, criatura, poblacion)
-            if hallado is None or hallado["ruta"]:
+            if hallado is not None and not hallado["ruta"]:
+                objetivo = poblacion.buscar_por_id(hallado["objetivo_id"])
+                r = combate.atacar(mapa, criatura, objetivo, ciclo, recursos, registro)
+                return self._resultado(criatura, estado, r["ok"], r["motivo"], externo=r)
+            # El ataque a construcciones reutiliza las validaciones de P9:
+            # alcance 1, energía de ataque y un solo golpe por ciclo.
+            edificio = buscar_construccion_enemiga(mapa, criatura, aldeas)
+            if edificio is None or edificio["ruta"]:
                 return self._resultado(criatura, estado, False, "no hay objetivo adyacente")
-            objetivo = poblacion.buscar_por_id(hallado["objetivo_id"])
-            r = combate.atacar(mapa, criatura, objetivo, ciclo, recursos, registro)
+            fila, columna = edificio["casilla"]
+            r = combate.atacar_construccion(
+                criatura, fila, columna, aldeas, ciclo,
+                dano_estructura=calcular_dano_construccion(criatura),
+                registro=registro
+            )
+            if r["ok"] and registro is not None:
+                registro.registrar_acontecimiento(
+                    ciclo, "ataque_construccion",
+                    f"Criatura {criatura.id} ataco {edificio['tipo']} de {edificio['linaje']} "
+                    f"y produjo {r['dano']} de daño",
+                    id_unico=f"ataque_edificio_{criatura.id}_{ciclo}"
+                )
+            # El resultado identifica al edificio para que P1 no aplique
+            # XP de eliminación de criaturas a un objetivo estructural.
+            r["tipo_objetivo"] = "construccion"
+            r["objetivo_linaje"] = edificio["linaje"]
+            r["objetivo_casilla"] = edificio["casilla"]
             return self._resultado(criatura, estado, r["ok"], r["motivo"], externo=r)
 
         if estado == "BUSCAR_CURA":
@@ -495,8 +573,20 @@ class EjecutorAcciones:
             linaje = criatura.linaje
             if not aldeas.existe_aldea(linaje):
                 if aldeas.existe_refugio_provisional(linaje):
+                    refugio = aldeas.consultar_refugio_provisional(linaje)
+                    if distancia(criatura.posicion, refugio["casilla"]) > 1:
+                        # La transformación del refugio se ejecuta desde el sitio
+                        # de construcción, no desde cualquier casilla del mapa.
+                        ruta = buscar_refugio(mapa, criatura, aldeas)
+                        if ruta is None:
+                            return self._resultado(criatura, estado, False,
+                                                   "No existe ruta hacia el refugio")
+                        mov = intentar_mover(mapa, criatura, ruta)
+                        return self._resultado(criatura, estado, mov["movio"],
+                                               "Se aproxima al refugio para reconstruir", mov)
                     ok, mensaje = aldeas.reconstruir_aldea(mapa, linaje, recursos,
-                                                           ciclo=ciclo, registro=registro)
+                                                           ciclo=ciclo, registro=registro,
+                                                           poblacion=poblacion)
                 else:
                     f, c = criatura.posicion
                     ok, mensaje = aldeas.construir_refugio_provisional(mapa, linaje, f, c, recursos,
@@ -510,3 +600,126 @@ class EjecutorAcciones:
             return self._resultado(criatura, estado, False, "la criatura esta muerta")
 
         return self._resultado(criatura, estado, False, "estado AFD desconocido: " + str(estado))
+
+
+# Funciones de navegación, defensa y acceso implementadas en el motor corregido.
+FACTOR_DANO_ORDINARIO_CONSTRUCCION = 1
+
+def hay_recurso_cercano(mapa, criatura, recursos):
+    # True si esta sobre una fuente valida o ve alguna dentro de su deteccion (para P7).
+    if mapa is None or recursos is None or criatura.posicion is None:
+        return False
+    f, c = criatura.posicion
+    fuente = recursos.consultar_fuente(f, c)
+    if (fuente is not None and fuente["cantidad"] > 0
+            and (fuente["tipo"] == "materiales"
+                 or recursos.es_alimento_compatible(criatura.linaje, fuente["tipo"]))):
+        return True
+    return buscar_recurso(mapa, criatura, recursos) is not None
+
+def evaluar_ventaja_combate(criatura, enemigo):
+    """Compara los turnos necesarios para ganar y para ser derrotado.
+
+    Se utiliza la misma fórmula de daño de P9 con los atributos vigentes,
+    incluidos bonos y transformaciones. El criterio conservador considera
+    favorable el enfrentamiento solo cuando puede derrotarse al enemigo
+    en menos golpes de los que este necesita para derrotar a la criatura.
+    Este cálculo es una aproximación para elegir conducta, no un combate
+    independiente ni una modificación de salud.
+    """
+    if (not criatura.vivo or not enemigo.vivo
+            or criatura.linaje == enemigo.linaje):
+        return False
+    dano_propio = max(2, criatura.ataque - enemigo.defensa // 2)
+    dano_enemigo = max(2, enemigo.ataque - criatura.defensa // 2)
+    golpes_para_ganar = (enemigo.salud + dano_propio - 1) // dano_propio
+    golpes_para_perder = (criatura.salud + dano_enemigo - 1) // dano_enemigo
+    return golpes_para_ganar < golpes_para_perder
+
+def amenaza_superior_cercana(criatura, poblacion, radio=2):
+    """Detecta rivales cercanos capaces de derrotar a la criatura.
+
+    La huida se considera una acción preventiva frente a una amenaza
+    identificada, siempre que exista energía para desplazarse una casilla.
+    """
+    if criatura.posicion is None or criatura.energia < COSTO_ENERGIA_MOVER:
+        return False
+    return any(
+        distancia(criatura.posicion, enemigo.posicion) <= radio
+        and not evaluar_ventaja_combate(criatura, enemigo)
+        for enemigo in enemigos_visibles(criatura, poblacion)
+    )
+
+def calcular_dano_construccion(criatura):
+    """Calcula el daño ordinario configurado contra una construcción.
+
+    Las aldeas no disponen de atributo defensa. Se aplica como valor
+    inicial la fuerza de ataque vigente, con mínimo de dos puntos.
+    """
+    return max(2, int(criatura.ataque * FACTOR_DANO_ORDINARIO_CONSTRUCCION))
+
+def buscar_construccion_enemiga(mapa, criatura, aldeas):
+    """Localiza una aldea o refugio enemigo alcanzable en el radio de detección.
+
+    La ruta termina en una casilla adyacente a la construcción, pues P9
+    solo admite ataques a distancia Manhattan igual a uno. Las casillas
+    ocupadas no se atraviesan y las construcciones propias se excluyen.
+    """
+    if (mapa is None or aldeas is None or criatura.posicion is None):
+        return None
+    candidatos = []
+    for construccion in aldeas.listar_construcciones():
+        if (not construccion["existe"]
+                or construccion["linaje"] == criatura.linaje):
+            continue
+        centro = construccion["casilla"]
+        if (RADIO_DETECCION_ACTIVO
+                and distancia(criatura.posicion, centro) > criatura.deteccion):
+            continue
+        if distancia(criatura.posicion, centro) == 1:
+            ruta = []
+        else:
+            vecinos = {
+                pos for pos in obtener_vecinos(mapa, *centro)
+                if es_transitable(mapa, *pos)
+                and (pos == criatura.posicion or casilla_disponible(mapa, *pos))
+            }
+            ruta = buscar_ruta(mapa, criatura.posicion, vecinos) if vecinos else None
+        if ruta is not None:
+            candidatos.append((len(ruta), centro, construccion["linaje"],
+                               construccion["tipo"], ruta))
+    if not candidatos:
+        return None
+    _, centro, linaje, tipo, ruta = min(candidatos,
+                                      key=lambda datos: (datos[0], datos[1]))
+    return {"ruta": ruta, "casilla": centro, "linaje": linaje,
+            "tipo": tipo}
+
+def radio_acceso_construccion(construccion):
+    """Calcula el perímetro lógico de alojamiento según la capacidad.
+
+    El mapa mantiene un único ocupante por casilla. Las construcciones
+    admiten varios residentes porque sus plazas se representan en un área
+    de acceso, y no como ocupación simultánea de una sola casilla.
+    """
+    if construccion is None or not construccion.get("existe", False):
+        return 0
+    capacidad = construccion.get("capacidad") or 1
+    radio = 0
+    while 1 + 2 * radio * (radio + 1) < capacidad:
+        radio += 1
+    return radio
+
+def _en_acceso_refugio(mapa, criatura, aldeas):
+    """Comprueba que la criatura se encuentre dentro del perímetro de alojamiento.
+
+    La ocupación real sigue registrada en P5 y respeta la capacidad del
+    refugio o de la aldea. Este perímetro únicamente representa el acceso
+    físico de las criaturas dentro de la cuadrícula del mapa.
+    """
+    if aldeas is None or not criatura.vivo or criatura.posicion is None:
+        return False
+    construccion = aldeas.obtener_refugio_disponible_linaje(criatura.linaje)
+    if construccion is None or not construccion["existe"]:
+        return False
+    return distancia(criatura.posicion, construccion["casilla"]) <= radio_acceso_construccion(construccion)
