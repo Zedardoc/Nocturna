@@ -258,6 +258,8 @@ class InterfazNocturnaGUI:
         """
         pygame.init()
         pygame.display.set_caption("NOCTURNA — El Despertar del Eclipse")
+        logo = pygame.image.load("./img/logo.png")
+        pygame.display.set_icon(logo)
         info = pygame.display.Info()
         w = max(1100, min(1380, info.current_w - 40))
         h = max(760, min(860, info.current_h - 90))
@@ -569,6 +571,7 @@ class InterfazNocturnaGUI:
 
     def _layout(self):
         self.pantalla = pygame.display.get_surface()
+        
         W, H = self.pantalla.get_size()
         pad, top, leyenda = 12, 56, 58
         self.top_h = top
