@@ -233,12 +233,12 @@ def ejecutar_terminal(simulacion, cantidad_ciclos):
 def iniciar_interfaz(simulacion, fabrica=None):
     """Abre la interfaz gráfica (gui.iniciar_gui). fabrica() crea una partida nueva (botón Reiniciar)."""
     try:
-        import gui
+        import bettergui
     except ImportError as exc:
         raise RuntimeError(
             "No se pudo abrir la interfaz (¿falta tkinter?). Usa --terminal."
         ) from exc
-    return gui.iniciar_gui(simulacion, fabrica=fabrica)
+    return bettergui.iniciar_gui(simulacion, fabrica=fabrica)
 
 
 def main():
